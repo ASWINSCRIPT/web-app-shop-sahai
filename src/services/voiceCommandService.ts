@@ -135,18 +135,61 @@ function cleanForNameExtraction(text: string, language: string): string {
   return cleaned.replace(/\s{2,}/g, ' ').trim();
 }
 
+// Define purchase state interface
+interface PurchaseState {
+  step: 'idle' | 'supplier' | 'total_amount' | 'amount_paid' | 'confirmation';
+  supplierName: string;
+  totalAmount: number | null;
+  amountPaid: number | null;
+  isEnglish: boolean;
+}
+
 export class VoiceCommandService {
   static async processCommand(command: string, language: string): Promise<VoiceCommandResult> {
     const lowerCommand = command.toLowerCase();
     const isEnglish = language === "english";
     
     try {
-      let amount: number | null = null;
+      // First try to extract amount using the universal parser
+      let amount: number | null = universalNumberParser(lowerCommand);
       let amountText: string | null = null;
-      amount = universalNumberParser(lowerCommand);
-      if (amount !== null) {
-        amountText = amount.toString();
+      
+      // If amount not found, try to extract number words specifically
+      if (amount === null) {
+        // Try Malayalam number words if language is not English
+        if (!isEnglish) {
+          const malayalamNumberMatch = lowerCommand.match(/([\s\S]+?)\s*(രൂപ|rs|rupees|പൈസ|paise|പൈസ്സ)/i);
+          if (malayalamNumberMatch && malayalamNumberMatch[1]) {
+            amount = parseMalayalamCompoundNumber(malayalamNumberMatch[1].trim());
+            if (amount !== null) {
+              amountText = malayalamNumberMatch[1].trim();
+            }
+          }
+        }
+        
+        // If still no amount, try to find any number in the command
+        if (amount === null) {
+          const numberMatch = lowerCommand.match(/\d+/);
+          if (numberMatch) {
+            amount = parseInt(numberMatch[0], 10);
+            amountText = numberMatch[0];
+          }
+        }
+      } else {
+        // If amount was found, get the text that was used to represent it
+        const numberWords = [...Object.keys(malayalamNumberMap), ...Object.keys(englishNumberMap)];
+        for (const word of numberWords) {
+          if (lowerCommand.includes(word)) {
+            amountText = word;
+            break;
+          }
+        }
+        // If no matching word found, use the amount as string
+        if (!amountText) {
+          amountText = amount.toString();
+        }
       }
+      
       // Remove amount text from command for name extraction
       let commandWithoutAmount = lowerCommand;
       if (amountText) {
@@ -262,14 +305,289 @@ export class VoiceCommandService {
     }
   }
 
+  private static purchaseState: PurchaseState = {
+    step: 'idle',
+    supplierName: '',
+    totalAmount: null,
+    amountPaid: null,
+    isEnglish: true
+  };
+
+  private static resetPurchaseState(): void {
+    this.purchaseState = {
+      step: 'idle',
+      supplierName: '',
+      totalAmount: null,
+      amountPaid: null,
+      isEnglish: this.purchaseState.isEnglish
+    };
+  }
+
   private static async handlePurchaseCommand(command: string, amount: number | null, lowerCommand: string, isEnglish: boolean, amountText?: string): Promise<VoiceCommandResult> {
-    if (!amount || isNaN(amount)) {
+    // If this is a fresh purchase command, start the flow
+    if (this.purchaseState.step === 'idle') {
+      this.purchaseState = {
+        step: 'supplier',
+        supplierName: '',
+        totalAmount: null,
+        amountPaid: null,
+        isEnglish
+      };
+      return {
+        success: true,
+        message: isEnglish 
+          ? "Please say the supplier's name." 
+          : "ദയവായി വിതരണക്കാരന്റെ പേര് പറയുക.",
+        summary: isEnglish ? "Supplier name?" : "വിതരണക്കാരന്റെ പേര്?",
+        debug: `Starting purchase flow. Step: supplier`
+      };
+    }
+    
+    // Handle supplier name step
+    if (this.purchaseState.step === 'supplier') {
+      const supplierName = cleanForNameExtraction(command, isEnglish ? 'english' : 'malayalam') || command.trim();
+      
+      if (!supplierName || supplierName.length < 2) {
+        return {
+          success: false,
+          message: isEnglish 
+            ? "I couldn't recognize the supplier name. Please try again." 
+            : "വിതരണക്കാരന്റെ പേര് തിരിച്ചറിയാൻ കഴിഞ്ഞില്ല. ദയവായി വീണ്ടും ശ്രമിക്കുക.",
+          summary: isEnglish ? "Invalid name" : "അസാധുവായ പേര്"
+        };
+      }
+
+      this.purchaseState.supplierName = supplierName;
+      this.purchaseState.step = 'total_amount';
+      
+      return {
+        success: true,
+        message: isEnglish 
+          ? `Supplier set to ${supplierName}. What is the total amount?` 
+          : `${supplierName} എന്നതായി സജ്ജമാക്കി. ആകെ തുക എത്ര?`,
+        summary: isEnglish ? "Total amount?" : "ആകെ തുക?",
+        debug: `Supplier: ${supplierName}, moving to total amount step`
+      };
+    }
+    
+    // Handle total amount step
+    if (this.purchaseState.step === 'total_amount') {
+      if (!amount || isNaN(amount) || amount <= 0) {
+        return {
+          success: false,
+          message: isEnglish
+            ? "Please provide a valid total amount."
+            : "ദയവായി ഒരു സാധുവായ ആകെ തുക നൽകുക.",
+          summary: isEnglish ? "Invalid amount" : "അസാധുവായ തുക"
+        };
+      }
+
+      this.purchaseState.totalAmount = amount;
+      this.purchaseState.step = 'amount_paid';
+      
+      return {
+        success: true,
+        message: isEnglish
+          ? `Total amount set to ₹${amount}. How much are you paying now?`
+          : `ആകെ തുക ₹${amount} എന്ന് സജ്ജമാക്കി. എത്ര തുക നൽകുന്നു?`,
+        summary: isEnglish ? "Amount paid?" : "നൽകിയ തുക?",
+        debug: `Total amount: ${amount}, moving to amount paid step`
+      };
+    }
+    
+    // Handle amount paid step
+    if (this.purchaseState.step === 'amount_paid') {
+      if (!amount || isNaN(amount) || amount <= 0) {
+        return {
+          success: false,
+          message: isEnglish
+            ? "Please provide a valid amount paid."
+            : "ദയവായി ഒരു സാധുവായ തുക നൽകുക.",
+          summary: isEnglish ? "Invalid amount" : "അസാധുവായ തുക"
+        };
+      }
+
+      if (this.purchaseState.totalAmount && amount > this.purchaseState.totalAmount) {
+        return {
+          success: false,
+          message: isEnglish
+            ? `Amount paid (₹${amount}) cannot be more than total amount (₹${this.purchaseState.totalAmount}). Please try again.`
+            : `നൽകിയ തുക (₹${amount}) ആകെ തുകയെക്കാൾ (₹${this.purchaseState.totalAmount}) കൂടുതലാകാൻ കഴിയില്ല. ദയവായി വീണ്ടും ശ്രമിക്കുക.`,
+          summary: isEnglish ? "Amount too high" : "തുക വളരെ കൂടുതലാണ്"
+        };
+      }
+
+      this.purchaseState.amountPaid = amount;
+      this.purchaseState.step = 'confirmation';
+      
+      const balance = (this.purchaseState.totalAmount || 0) - amount;
+      
+      return {
+        success: true,
+        message: isEnglish
+          ? `You're paying ₹${amount} of ₹${this.purchaseState.totalAmount}. Balance will be ₹${balance}. Confirm to save?`
+          : `നിങ്ങൾ ₹${this.purchaseState.totalAmount} ൽ ₹${amount} നൽകുന്നു. ബാക്കി ₹${balance}. സംരക്ഷിക്കാൻ സ്ഥിരീകരിക്കണോ?`,
+        summary: isEnglish ? "Confirm?" : "സ്ഥിരീകരിക്കണോ?",
+        debug: `Amount paid: ${amount}, moving to confirmation step`
+      };
+    }
+    
+    // Handle confirmation step
+    if (this.purchaseState.step === 'confirmation') {
+      const confirmKeywords = isEnglish 
+        ? ['yes', 'confirm', 'save', 'ok', 'correct']
+        : ['ശരിയാണ്', 'ശരി', 'അതെ', 'അതേ', 'സേവ്', 'ശരിയാണ്'];
+      
+      const cancelKeywords = isEnglish 
+        ? ['no', 'cancel', 'wrong', 'stop', 'exit']
+        : ['ഇല്ല', 'റദ്ദാക്കുക', 'തെറ്റാണ്', 'നിർത്തുക', 'പുറത്ത്'];
+      
+      const lowerCmd = command.toLowerCase();
+      const isConfirmed = confirmKeywords.some(keyword => lowerCmd.includes(keyword));
+      const isCancelled = cancelKeywords.some(keyword => lowerCmd.includes(keyword));
+      
+      if (!isConfirmed && !isCancelled) {
+        return {
+          success: false,
+          message: isEnglish
+            ? "Please say 'confirm' to save or 'cancel' to start over."
+            : "സംരക്ഷിക്കാൻ 'ശരി' അല്ലെങ്കിൽ റദ്ദാക്കാൻ 'ഇല്ല' പറയുക.",
+          summary: isEnglish ? "Confirm or cancel?" : "സ്ഥിരീകരിക്കണോ റദ്ദാക്കണോ?"
+        };
+      }
+      
+      if (isCancelled) {
+        this.resetPurchaseState();
+        return {
+          success: true,
+          message: isEnglish 
+            ? "Purchase cancelled. You can start over." 
+            : "വാങ്ങൽ റദ്ദാക്കി. നിങ്ങൾക്ക് വീണ്ടും ആരംഭിക്കാം.",
+          summary: isEnglish ? "Cancelled" : "റദ്ദാക്കി",
+          debug: "Purchase flow cancelled by user"
+        };
+      }
+      
+      // Save the purchase to database
+      try {
+        console.log('Starting purchase save...');
+        const { data: { session }, error: sessionError } = await supabase.auth.getSession();
+        
+        if (sessionError || !session?.user) {
+          const errorMsg = 'User not authenticated';
+          console.error(errorMsg, { sessionError, hasSession: !!session });
+          throw new Error(isEnglish ? errorMsg : "ഉപയോക്താവ് പ്രവേശിച്ചിട്ടില്ല");
+        }
+        
+        const user = session.user;
+        const supplierName = this.purchaseState.supplierName;
+        const totalAmount = this.purchaseState.totalAmount || 0;
+        const amountPaid = this.purchaseState.amountPaid || 0;
+        const balance = totalAmount - amountPaid;
+        
+        console.log('Purchase data prepared:', {
+          supplierName,
+          totalAmount,
+          amountPaid,
+          balance,
+          userId: user.id
+        });
+        
+        // Insert purchase record
+        console.log('Attempting to insert purchase record...');
+        const purchaseData = {
+          supplier_name: supplierName,
+          total_amount: totalAmount,
+          amount_paid: amountPaid,
+          balance: balance,
+          user_id: user.id,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString()
+        };
+        
+        console.log('Purchase data being inserted:', JSON.stringify(purchaseData, null, 2));
+        
+        const { data: purchase, error: purchaseError } = await supabase
+          .from('purchases')
+          .insert(purchaseData)
+          .select()
+          .single();
+          
+        if (purchaseError) {
+          console.error('Error inserting purchase:', purchaseError);
+          throw purchaseError;
+        }
+        
+        console.log('Purchase inserted successfully:', purchase);
+        
+        // Insert transaction record if amount paid is greater than 0
+        if (amountPaid > 0) {
+          console.log('Attempting to insert transaction record...');
+          const txData = {
+            user_id: user.id,
+            type: 'expense',
+            amount: amountPaid,
+            category: 'purchase',
+            description: `Purchase from ${supplierName}`,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString()
+          };
+          
+          console.log('Transaction data being inserted:', JSON.stringify(txData, null, 2));
+          
+          const { data: tx, error: txError } = await supabase
+            .from('transactions')
+            .insert(txData)
+            .select()
+            .single();
+            
+          if (txError) {
+            console.error('Error inserting transaction:', txError);
+            throw txError;
+          }
+          
+          console.log('Transaction inserted successfully:', tx);
+        } else {
+          console.log('No transaction created as amount paid is 0');
+        }
+        
+        // Reset state
+        this.resetPurchaseState();
+        
+        // Return success response
+        return {
+          success: true,
+          message: isEnglish
+            ? `Purchase from ${supplierName} for ₹${totalAmount} has been saved. ₹${amountPaid} paid, balance is ₹${balance}.`
+            : `${supplierName} ൽ നിന്നുള്ള ₹${totalAmount} വാങ്ങൽ സംരക്ഷിച്ചു. ₹${amountPaid} നൽകി, ബാക്കി ₹${balance}.`,
+          summary: isEnglish ? "Purchase saved" : "വാങ്ങൽ സംരക്ഷിച്ചു",
+          debug: `Purchase saved: ${JSON.stringify(purchase)}`
+        };
+        
+      } catch (error: any) {
+        console.error('Error saving purchase:', error);
+        this.resetPurchaseState();
+        
+        return {
+          success: false,
+          message: isEnglish
+            ? "Failed to save purchase. Please try again."
+            : "വാങ്ങൽ സംരക്ഷിക്കാൻ കഴിഞ്ഞില്ല. ദയവായി വീണ്ടും ശ്രമിക്കുക.",
+          summary: isEnglish ? "Save failed" : "സംരക്ഷിക്കാൻ കഴിഞ്ഞില്ല",
+          debug: `Error: ${error.message}`
+        };
+      }
+    }
+    // Input validation
+    if (!amount || isNaN(amount) || amount <= 0) {
+      const errorMessage = isEnglish
+        ? amount ? "Please enter a valid positive amount." : "Amount not recognized. Please say the amount clearly or enter it manually."
+        : amount ? "ദയവായി ഒരു സാധുവായ പോസിറ്റീവ് തുക നൽകുക." : "തുക തിരിച്ചറിയാൻ കഴിഞ്ഞില്ല. ദയവായി തുക വ്യക്തമായി പറയുക അല്ലെങ്കിൽ കൈമാറുക.";
+      
       return {
         success: false,
-        message: isEnglish 
-          ? "Amount not recognized. Please say the amount clearly or enter it manually."
-          : "തുക തിരിച്ചറിയാൻ കഴിഞ്ഞില്ല. ദയവായി തുക വ്യക്തമായി പറയുക അല്ലെങ്കിൽ കൈയാൽ നൽകുക.",
-        summary: isEnglish ? "Amount not recognized." : "തുക തിരിച്ചറിയാൻ കഴിഞ്ഞില്ല.",
+        message: errorMessage,
+        summary: isEnglish ? "Invalid amount" : "അസാധുവായ തുക",
         debug: `transcript: ${command}, extracted amount: ${amountText}`
       };
     }
@@ -367,45 +685,173 @@ export class VoiceCommandService {
       };
     }
 
+    console.log('=== Starting purchase process ===');
+    const supabaseClient = supabase; // Use the imported supabase client
+    
     try {
+      // Get user session with better error handling
+      console.log('Getting user session...');
+      const { data: { session }, error: sessionError } = await supabaseClient.auth.getSession();
+      
+      if (sessionError || !session?.user) {
+        const errorMsg = 'User not authenticated';
+        console.error(errorMsg, { sessionError, session });
+        return {
+          success: false,
+          message: isEnglish ? errorMsg : 'ഉപയോക്താവ് പ്രവേശിച്ചിട്ടില്ല',
+          summary: isEnglish ? 'Authentication failed' : 'അധികാരപരിശോധന പരാജയപ്പെട്ടു',
+          debug: `Session error: ${sessionError?.message || 'No session'}`
+        };
+      }
+      
+      const user = session.user;
+      console.log('User authenticated:', { userId: user.id });
+
+      console.log('Attempting to save purchase:', { supplierName, amount, userId: user.id });
+      
+      // Prepare purchase data
+      const purchaseData = {
+        supplier_name: supplierName,
+        total_amount: amount,
+        amount_paid: 0,
+        balance: amount,
+        user_id: user.id,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      };
+      
+      console.log('Attempting to save purchase:', purchaseData);
+      
+      // Start a transaction
+      console.log('Starting database transaction...');
+      
       // First insert into purchases table
-      const { data: purchaseData, error: purchaseError } = await supabase
+      const { data: purchaseResult, error: purchaseError } = await supabaseClient
         .from('purchases')
-        .insert({
-          supplier_name: supplierName,
-          total_amount: amount,
-          amount_paid: 0,
-          balance: amount,
-          user_id: (await supabase.auth.getUser()).data.user?.id || ''
-        })
+        .insert(purchaseData)
         .select()
         .single();
 
-      if (purchaseError) throw purchaseError;
-      
-      // Then insert into transactions table
-      const { error: txError } = await supabase
-        .from('transactions')
-        .insert({
-          type: 'expense',
-          amount: amount,
-          category: 'Purchase',
-          description: `Purchase from ${supplierName} via voice`,
-          user_id: (await supabase.auth.getUser()).data.user?.id || ''
+      if (purchaseError) {
+        console.error('Purchase insertion failed:', {
+          error: purchaseError,
+          details: purchaseError.details,
+          hint: purchaseError.hint,
+          code: purchaseError.code,
+          purchaseData
         });
         
-      if (txError) {
-        console.error('Transaction insertion error:', txError);
-        // Don't fail the whole operation if transaction insert fails
+        // Map error codes to user-friendly messages
+        const errorMessages: Record<string, {en: string, ml: string}> = {
+          '23505': { 
+            en: 'This purchase already exists',
+            ml: 'ഈ വാങ്ങൽ ഇതിനകം നിലവിലുണ്ട്'
+          },
+          '23503': { 
+            en: 'Invalid user or reference',
+            ml: 'അസാധുവായ ഉപയോക്താവ് അല്ലെങ്കിൽ റഫറൻസ്'
+          },
+          '23514': {
+            en: 'Invalid purchase data',
+            ml: 'അസാധുവായ വാങ്ങൽ ഡാറ്റ'
+          },
+          '22P02': {
+            en: 'Invalid data format',
+            ml: 'അസാധുവായ ഡാറ്റ ഫോർമാറ്റ്'
+          },
+          '22001': {
+            en: 'Data too long for column',
+            ml: 'ഡാറ്റ വളരെ നീളമുള്ളതാണ്'
+          },
+          '22003': {
+            en: 'Numeric value out of range',
+            ml: 'സംഖ്യാ മൂല്യം പരിധിയിൽ ഇല്ല'
+          },
+          '23000': {
+            en: 'Database error occurred',
+            ml: 'ഡാറ്റാബേസിൽ പിശക് സംഭവിച്ചു'
+          },
+          '23502': {
+            en: 'Required field is missing',
+            ml: 'ആവശ്യമായ ഫീൽഡ് ശൂന്യമാണ്'
+          }
+        };
+        
+        // Get the error message or use a default one
+        const errorInfo = errorMessages[purchaseError.code] || {
+          en: 'Failed to save purchase',
+          ml: 'വാങ്ങൽ സംരക്ഷിക്കാൻ കഴിഞ്ഞില്ല'
+        };
+        
         return {
-          success: true, // Still return success since purchase was saved
+          success: false,
+          message: isEnglish ? errorInfo.en : errorInfo.ml,
+          summary: isEnglish ? 'Save failed' : 'സംരക്ഷിക്കാൻ കഴിഞ്ഞില്ല',
+          debug: `Purchase error: ${purchaseError.message} (Code: ${purchaseError.code})`
+        };
+      }
+      
+      console.log('Purchase saved successfully:', purchaseResult);
+      
+      // Then insert into transactions table
+      console.log('Attempting to save transaction for purchase...');
+      const transactionData = {
+        type: 'expense',
+        amount: amount,
+        category: 'Purchase',
+        description: `Purchase from ${supplierName} via voice`,
+        user_id: user.id,
+        purchase_id: purchaseResult.id, // Link to the purchase
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      };
+      
+      console.log('Transaction data:', transactionData);
+      
+      try {
+        const { data: txData, error: txError } = await supabaseClient
+          .from('transactions')
+          .insert(transactionData)
+          .select()
+          .single();
+          
+        if (txError) {
+          // If transaction fails, we should rollback the purchase
+          console.error('Transaction insertion failed, rolling back purchase...');
+          const { error: deleteError } = await supabaseClient
+            .from('purchases')
+            .delete()
+            .eq('id', purchaseResult.id);
+            
+          if (deleteError) {
+            console.error('Failed to rollback purchase after transaction failure:', deleteError);
+          }
+          
+          throw txError;
+        }
+        
+        console.log('Transaction saved successfully:', txData);
+        
+        // If we get here, both operations succeeded
+        console.log('Purchase and transaction saved successfully');
+        
+      } catch (txError) {
+        console.error('Transaction processing failed:', {
+          error: txError,
+          details: txError.details,
+          hint: txError.hint,
+          code: txError.code,
+          transactionData
+        });
+        
+        // Return error to user
+        return {
+          success: false,
           message: isEnglish
-            ? `Purchase recorded but transaction not logged: ${txError.message}`
-            : `വാങ്ങൽ രേഖപ്പെടുത്തി, പക്ഷേ ഇടപാട് ലോഗ് ചെയ്യാൻ കഴിഞ്ഞില്ല: ${txError.message}`,
-          summary: isEnglish 
-            ? `Purchase: ₹${amount} (${supplierName})` 
-            : `വാങ്ങൽ: ₹${amount} (${supplierName})`,
-          debug: `Purchase saved but transaction failed: ${txError.message}`
+            ? 'Failed to record transaction. Please try again.'
+            : 'ട്രാൻസാക്ഷൻ രേഖപ്പെടുത്താൻ കഴിഞ്ഞില്ല. ദയവായി വീണ്ടും ശ്രമിക്കുക.',
+          summary: isEnglish ? 'Transaction failed' : 'ട്രാൻസാക്ഷൻ പരാജയപ്പെട്ടു',
+          debug: `Transaction error: ${txError.message} (Code: ${txError.code})`
         };
       }
       
