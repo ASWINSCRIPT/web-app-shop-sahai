@@ -367,56 +367,69 @@ export class VoiceCommandService {
       };
     }
 
-    const { data, error } = await supabase
-      .from('purchases')
-      .insert({
-        supplier_name: supplierName,
-        total_amount: amount,
-        amount_paid: 0,
-        balance: amount,
-        user_id: (await supabase.auth.getUser()).data.user?.id || ''
-      });
+    try {
+      // First insert into purchases table
+      const { data: purchaseData, error: purchaseError } = await supabase
+        .from('purchases')
+        .insert({
+          supplier_name: supplierName,
+          total_amount: amount,
+          amount_paid: 0,
+          balance: amount,
+          user_id: (await supabase.auth.getUser()).data.user?.id || ''
+        })
+        .select()
+        .single();
 
-    if (error) {
+      if (purchaseError) throw purchaseError;
+      
+      // Then insert into transactions table
+      const { error: txError } = await supabase
+        .from('transactions')
+        .insert({
+          type: 'expense',
+          amount: amount,
+          category: 'Purchase',
+          description: `Purchase from ${supplierName} via voice`,
+          user_id: (await supabase.auth.getUser()).data.user?.id || ''
+        });
+        
+      if (txError) {
+        console.error('Transaction insertion error:', txError);
+        // Don't fail the whole operation if transaction insert fails
+        return {
+          success: true, // Still return success since purchase was saved
+          message: isEnglish
+            ? `Purchase recorded but transaction not logged: ${txError.message}`
+            : `വാങ്ങൽ രേഖപ്പെടുത്തി, പക്ഷേ ഇടപാട് ലോഗ് ചെയ്യാൻ കഴിഞ്ഞില്ല: ${txError.message}`,
+          summary: isEnglish 
+            ? `Purchase: ₹${amount} (${supplierName})` 
+            : `വാങ്ങൽ: ₹${amount} (${supplierName})`,
+          debug: `Purchase saved but transaction failed: ${txError.message}`
+        };
+      }
+      
+      return {
+        success: true,
+        message: isEnglish 
+          ? `Successfully recorded purchase of ₹${amount} from ${supplierName}.`
+          : `${supplierName} ൽ നിന്ന് ₹${amount} വാങ്ങൽ വിജയകരമായി രേഖപ്പെടുത്തി.`,
+        summary: isEnglish 
+          ? `Purchase: ₹${amount} (${supplierName})` 
+          : `വാങ്ങൽ: ₹${amount} (${supplierName})`,
+        debug: `amount: ${amount}, supplier: ${supplierName}`
+      };
+    } catch (error) {
+      console.error('Error in handlePurchaseCommand:', error);
       return {
         success: false,
-        message: isEnglish 
+        message: isEnglish
           ? `Failed to save purchase: ${error.message}`
           : `വാങ്ങൽ സംരക്ഷിക്കാൻ പരാജയപ്പെട്ടു: ${error.message}`,
         summary: isEnglish ? 'Purchase failed.' : 'വാങ്ങൽ പരാജയപ്പെട്ടു.',
         debug: `amount: ${amount}, supplier: ${supplierName}, error: ${error.message}`
       };
     }
-    
-    // Insert into transactions as expense
-    const { error: txError } = await supabase
-      .from('transactions')
-      .insert({
-        type: 'expense',
-        amount: amount,
-        category: 'Purchase',
-        description: `Purchase from ${supplierName} via voice`,
-        user_id: (await supabase.auth.getUser()).data.user?.id || ''
-      });
-    if (txError) {
-      return {
-        success: false,
-        message: isEnglish 
-          ? `Purchase saved but failed to add to transactions: ${txError.message}`
-          : `വാങ്ങൽ സംരക്ഷിച്ചു, പക്ഷേ ട്രാൻസാക്ഷനിൽ ചേർക്കാൻ പരാജയപ്പെട്ടു: ${txError.message}`,
-        summary: isEnglish ? 'Purchase partial success.' : 'വാങ്ങൽ ഭാഗിക വിജയമാണ്.',
-        debug: `amount: ${amount}, supplier: ${supplierName}, txError: ${txError.message}`
-      };
-    }
-    
-    return {
-      success: true,
-      message: isEnglish 
-        ? `Successfully recorded purchase of ₹${amount} from ${supplierName}.`
-        : `${supplierName} ൽ നിന്ന് ₹${amount} വാങ്ങൽ വിജയകരമായി രേഖപ്പെടുത്തി.`,
-      summary: isEnglish ? `Purchase: ₹${amount} (${supplierName})` : `വാങ്ങൽ: ₹${amount} (${supplierName})`,
-      debug: `amount: ${amount}, supplier: ${supplierName}`
-    };
   }
 
   private static async handleBorrowCommand(command: string, amount: number | null, lowerCommand: string, isEnglish: boolean, amountText?: string): Promise<VoiceCommandResult> {
@@ -520,34 +533,67 @@ export class VoiceCommandService {
       };
     }
 
-    const { data: borrowData, error: borrowError } = await supabase
-      .from('borrows')
-      .insert({
-        borrower_name: borrowerName,
-        total_given: amount,
-        amount_paid: 0,
-        balance: amount,
-        user_id: (await supabase.auth.getUser()).data.user?.id || ''
-      });
+    try {
+      // First insert into borrows table
+      const { data: borrowData, error: borrowError } = await supabase
+        .from('borrows')
+        .insert({
+          borrower_name: borrowerName,
+          total_given: amount,
+          amount_paid: 0,
+          balance: amount,
+          user_id: (await supabase.auth.getUser()).data.user?.id || ''
+        })
+        .select()
+        .single();
 
-    if (borrowError) throw borrowError;
-    
-    // Insert into transactions as expense
-    const { error: txBorrowError } = await supabase
-      .from('transactions')
-      .insert({
-        type: 'expense',
-        amount: amount,
-        category: 'Borrow',
-        description: `Borrow to ${borrowerName} via voice`,
-        user_id: (await supabase.auth.getUser()).data.user?.id || ''
-      });
-    if (txBorrowError) {
+      if (borrowError) throw borrowError;
+      
+      // Then insert into transactions table
+      const { error: txBorrowError } = await supabase
+        .from('transactions')
+        .insert({
+          type: 'expense',
+          amount: amount,
+          category: 'Borrow',
+          description: `Borrow to ${borrowerName} via voice`,
+          user_id: (await supabase.auth.getUser()).data.user?.id || ''
+        });
+        
+      if (txBorrowError) {
+        console.error('Transaction insertion error:', txBorrowError);
+        // Don't fail the whole operation if transaction insert fails
+        return {
+          success: true, // Still return success since borrow was saved
+          message: isEnglish
+            ? `Borrow recorded but transaction not logged: ${txBorrowError.message}`
+            : `കടം രേഖപ്പെടുത്തി, പക്ഷേ ഇടപാട് ലോഗ് ചെയ്യാൻ കഴിഞ്ഞില്ല: ${txBorrowError.message}`,
+          summary: isEnglish 
+            ? `Borrow: ₹${amount} (${borrowerName})` 
+            : `കടം: ₹${amount} (${borrowerName})`,
+          debug: `Borrow saved but transaction failed: ${txBorrowError.message}`
+        };
+      }
+      
+      return {
+        success: true,
+        message: isEnglish
+          ? `Successfully recorded borrow of ₹${amount} to ${borrowerName}.`
+          : `${borrowerName} ക്ക് ₹${amount} കടം നൽകിയത് വിജയകരമായി രേഖപ്പെടുത്തി.`,
+        summary: isEnglish 
+          ? `Borrow: ₹${amount} (${borrowerName})` 
+          : `കടം: ₹${amount} (${borrowerName})`,
+        debug: `amount: ${amount}, borrower: ${borrowerName}`
+      };
+    } catch (error) {
+      console.error('Error in handleBorrowCommand:', error);
       return {
         success: false,
         message: isEnglish
-          ? "Could not save the transaction. Please try again."
-          : "ഇടപാട് സംരക്ഷിക്കാൻ കഴിഞ്ഞില്ല. ദയവായി വീണ്ടും ശ്രമിക്കുക.",
+          ? `Failed to save borrow: ${error.message}`
+          : `കടം സംരക്ഷിക്കാൻ പരാജയപ്പെട്ടു: ${error.message}`,
+        summary: isEnglish ? 'Borrow failed.' : 'കടം രേഖപ്പെടുത്താൻ കഴിഞ്ഞില്ല.',
+        debug: `amount: ${amount}, borrower: ${borrowerName}, error: ${error.message}`
       };
     }
   }
